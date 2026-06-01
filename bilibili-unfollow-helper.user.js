@@ -2,10 +2,8 @@
 // @name         B站关注列表标签分析 & 批量取关
 // @namespace    https://github.com/barikyo/bilibili-unfollow-helper
 // @version      1.6.0
-// @description  按需分析选中的UP主最新视频标签，展示个人简介，支持全选/反选及批量取关，修复风控导致的无视频误判
+// @description  按需分析选中的UP主最新视频标签，展示个人简介，支持全选/反选及批量取关
 // @author       barikyo
-// @match        https://space.bilibili.com/*/fans/follow*
-// @match        https://www.bilibili.com/
 // @match        https://space.bilibili.com/*
 // @connect      api.bilibili.com
 // @connect      space.bilibili.com
