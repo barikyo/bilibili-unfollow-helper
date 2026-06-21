@@ -1,12 +1,19 @@
 // ==UserScript==
-// @name         B站关注列表标签分析 & 批量取关
-// @namespace    https://github.com/barikyo/bilibili-unfollow-helper
-// @version      1.6.0
-// @description  按需分析选中的UP主最新视频标签，展示个人简介，支持全选/反选及批量取关
-// @author       barikyo
+// @name         B站关注列表标签分析 & 批量取关 (反风控增强版)
+// @namespace    https://github.com/brui233/bilibili-unfollow-helper
+// @version      1.7.0
+// @description  按需分析选中的UP主最新视频标签，支持互关筛选、标签独立搜索、批量取关，内置随机延迟与分批冷却防风控机制
+// @author       Userscript
+// @match        https://space.bilibili.com/*/fans/follow*
+// @match        https://www.bilibili.com/
 // @match        https://space.bilibili.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      api.bilibili.com
 // @connect      space.bilibili.com
+// @run-at       document-idle
 // @license      MIT
 // ==/UserScript==
 
@@ -63,32 +70,26 @@
     throw new Error('获取关注列表失败：' + (data?.message || '未知错误'));
   }
 
-  // 【核心修改】双重机制获取最新视频的 bvid 绕过风控
   async function fetchLatestBvid(uid) {
-    // 方案 1: 尝试调用旧版或无签名的稿件搜索接口
     const arcData = await gmFetch(
       `https://api.bilibili.com/x/space/wbi/arc/search?mid=${uid}&ps=5&pn=1`
     );
     if (arcData?.code === 0) {
       const vlist = arcData.data?.list?.vlist || [];
       if (vlist.length > 0) return vlist[0].bvid;
-      return null; // 确定无视频
+      return null;
     }
 
-    // 方案 2: 若方案 1 失败（大概率触发了 Wbi 签名拦截，code 为 -400），降级使用动态接口
     const dynData = await gmFetch(
       `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${uid}`
     );
     if (dynData?.code === 0 && dynData.data?.items) {
-      // 在动态中寻找第一个类型为“视频发布”的动态
       const vItem = dynData.data.items.find(i => i.type === 'DYNAMIC_TYPE_AV');
       if (vItem?.modules?.module_dynamic?.major?.archive?.bvid) {
         return vItem.modules.module_dynamic.major.archive.bvid;
       }
-      return null; // 动态里找不到近期视频，视作无视频
+      return null;
     }
-
-    // 如果接口双双挂掉，抛出错误以便 UI 显示红色的“出错”状态
     throw new Error(`获取视频列表被拦截或失败`);
   }
 
@@ -108,269 +109,71 @@
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `fid=${uid}&act=2&re_src=11&csrf=${csrf}`,
     });
+    
     if (data?.code === 0) return true;
+    // 识别风控拦截
+    if (data?.code === -400 || data?.code === -105 || (data?.message && data.message.includes('验证'))) {
+      throw new Error('触发风控');
+    }
     throw new Error(data?.message || '取关失败');
   }
 
   // ─── 样式注入 ────────────────────────────────────────────────────────────────
 
   GM_addStyle(`
-    #buh-launcher {
-      position: fixed;
-      bottom: 80px;
-      right: 24px;
-      z-index: 99998;
-      width: 46px;
-      height: 46px;
-      border-radius: 50%;
-      background: #fb7299;
-      color: #fff;
-      font-size: 20px;
-      border: none;
-      cursor: pointer;
-      box-shadow: 0 4px 16px rgba(251,114,153,.5);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: transform .2s, box-shadow .2s;
-    }
-    #buh-launcher:hover {
-      transform: scale(1.1);
-      box-shadow: 0 6px 20px rgba(251,114,153,.65);
-    }
-    #buh-panel {
-      position: fixed;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      z-index: 99999;
-      width: 740px;
-      max-width: 96vw;
-      max-height: 88vh;
-      background: #1a1a2e;
-      border-radius: 16px;
-      box-shadow: 0 24px 80px rgba(0,0,0,.6);
-      display: flex;
-      flex-direction: column;
-      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
-      overflow: hidden;
-      color: #e8e8f0;
-    }
+    #buh-launcher { position: fixed; bottom: 80px; right: 24px; z-index: 99998; width: 46px; height: 46px; border-radius: 50%; background: #fb7299; color: #fff; font-size: 20px; border: none; cursor: pointer; box-shadow: 0 4px 16px rgba(251,114,153,.5); display: flex; align-items: center; justify-content: center; transition: transform .2s, box-shadow .2s; }
+    #buh-launcher:hover { transform: scale(1.1); box-shadow: 0 6px 20px rgba(251,114,153,.65); }
+    #buh-panel { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 99999; width: 800px; max-width: 96vw; max-height: 88vh; background: #1a1a2e; border-radius: 16px; box-shadow: 0 24px 80px rgba(0,0,0,.6); display: flex; flex-direction: column; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; overflow: hidden; color: #e8e8f0; }
     #buh-panel.hidden { display: none; }
-    #buh-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 18px 22px 14px;
-      background: linear-gradient(135deg,#fb7299 0%,#e85d8a 100%);
-      flex-shrink: 0;
-    }
-    #buh-header h2 {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 700;
-      letter-spacing: .5px;
-      color: #fff;
-    }
+    #buh-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 14px; background: linear-gradient(135deg,#fb7299 0%,#e85d8a 100%); flex-shrink: 0; }
+    #buh-header h2 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: .5px; color: #fff; }
     #buh-header span { font-size: 12px; opacity: .85; color: #fff; }
-    #buh-close {
-      background: rgba(255,255,255,.2);
-      border: none;
-      color: #fff;
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      cursor: pointer;
-      font-size: 16px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background .15s;
-    }
+    #buh-close { background: rgba(255,255,255,.2); border: none; color: #fff; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: background .15s; }
     #buh-close:hover { background: rgba(255,255,255,.35); }
-    #buh-toolbar {
-      display: flex;
-      gap: 8px;
-      padding: 12px 16px;
-      background: #16213e;
-      flex-shrink: 0;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-    .buh-btn {
-      padding: 7px 16px;
-      border-radius: 8px;
-      border: none;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 600;
-      transition: opacity .15s, transform .1s;
-      white-space: nowrap;
-    }
+    #buh-toolbar { display: flex; gap: 8px; padding: 12px 16px; background: #16213e; flex-shrink: 0; align-items: center; flex-wrap: wrap; }
+    .buh-btn { padding: 7px 14px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px; font-weight: 600; transition: opacity .15s, transform .1s; white-space: nowrap; }
     .buh-btn:hover:not(:disabled) { opacity: .85; transform: translateY(-1px); }
     .buh-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
     .buh-btn-primary { background: #fb7299; color: #fff; }
     .buh-btn-danger  { background: #e74c3c; color: #fff; }
     .buh-btn-ghost   { background: rgba(255,255,255,.08); color: #ccc; }
-    #buh-search {
-      flex: 1;
-      min-width: 140px;
-      padding: 7px 12px;
-      border-radius: 8px;
-      border: 1px solid rgba(255,255,255,.1);
-      background: rgba(255,255,255,.05);
-      color: #e8e8f0;
-      font-size: 13px;
-      outline: none;
-    }
-    #buh-search:focus { border-color: #fb7299; }
-    #buh-progress-wrap {
-      padding: 0 16px 10px;
-      background: #16213e;
-      flex-shrink: 0;
-    }
-    #buh-progress-bar-bg {
-      height: 4px;
-      background: rgba(255,255,255,.08);
-      border-radius: 4px;
-      overflow: hidden;
-    }
-    #buh-progress-bar {
-      height: 100%;
-      background: linear-gradient(90deg,#fb7299,#e85d8a);
-      border-radius: 4px;
-      width: 0%;
-      transition: width .3s;
-    }
-    #buh-progress-text {
-      font-size: 11px;
-      color: #888;
-      margin-top: 4px;
-    }
-    #buh-tags-filter {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      padding: 10px 16px;
-      background: #16213e;
-      border-top: 1px solid rgba(255,255,255,.05);
-      max-height: 100px;
-      overflow-y: auto;
-      flex-shrink: 0;
-    }
-    .buh-tag-chip {
-      padding: 4px 10px;
-      border-radius: 20px;
-      font-size: 11px;
-      cursor: pointer;
-      border: 1px solid rgba(255,255,255,.12);
-      background: rgba(255,255,255,.05);
-      color: #aaa;
-      transition: all .15s;
-      white-space: nowrap;
-    }
+    .buh-btn-ghost.active { background: rgba(251,114,153,.2); color: #fb7299; border: 1px solid #fb7299; }
+    .buh-input { flex: 1; min-width: 100px; padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.05); color: #e8e8f0; font-size: 13px; outline: none; }
+    .buh-input:focus { border-color: #fb7299; }
+    #buh-progress-wrap { padding: 0 16px 10px; background: #16213e; flex-shrink: 0; }
+    #buh-progress-bar-bg { height: 4px; background: rgba(255,255,255,.08); border-radius: 4px; overflow: hidden; }
+    #buh-progress-bar { height: 100%; background: linear-gradient(90deg,#fb7299,#e85d8a); border-radius: 4px; width: 0%; transition: width .3s; }
+    #buh-progress-text { font-size: 11px; color: #888; margin-top: 4px; }
+    #buh-tags-filter { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px; background: #16213e; border-top: 1px solid rgba(255,255,255,.05); max-height: 100px; overflow-y: auto; flex-shrink: 0; }
+    .buh-tag-chip { padding: 4px 10px; border-radius: 20px; font-size: 11px; cursor: pointer; border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.05); color: #aaa; transition: all .15s; white-space: nowrap; }
     .buh-tag-chip:hover  { border-color: #fb7299; color: #fb7299; }
     .buh-tag-chip.active { background: #fb7299; border-color: #fb7299; color: #fff; }
-    #buh-stats {
-      padding: 8px 16px;
-      font-size: 12px;
-      color: #888;
-      background: #16213e;
-      border-top: 1px solid rgba(255,255,255,.05);
-      flex-shrink: 0;
-    }
+    #buh-stats { padding: 8px 16px; font-size: 12px; color: #888; background: #16213e; border-top: 1px solid rgba(255,255,255,.05); flex-shrink: 0; }
     #buh-stats b { color: #fb7299; }
-    #buh-list-wrap {
-      flex: 1;
-      overflow-y: auto;
-      padding: 8px 10px;
-    }
+    #buh-list-wrap { flex: 1; overflow-y: auto; padding: 8px 10px; }
     #buh-list-wrap::-webkit-scrollbar { width: 5px; }
     #buh-list-wrap::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 4px; }
-    .buh-up-card {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      margin-bottom: 4px;
-      background: rgba(255,255,255,.04);
-      transition: background .15s;
-    }
+    .buh-up-card { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; margin-bottom: 4px; background: rgba(255,255,255,.04); transition: background .15s; }
     .buh-up-card:hover { background: rgba(255,255,255,.08); }
     .buh-up-card.selected { background: rgba(251,114,153,.12); }
-    .buh-check {
-      width: 18px;
-      height: 18px;
-      accent-color: #fb7299;
-      cursor: pointer;
-      flex-shrink: 0;
-    }
-    .buh-avatar {
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      object-fit: cover;
-      flex-shrink: 0;
-      border: 2px solid rgba(255,255,255,.1);
-    }
+    .buh-check { width: 18px; height: 18px; accent-color: #fb7299; cursor: pointer; flex-shrink: 0; }
+    .buh-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 2px solid rgba(255,255,255,.1); }
     .buh-up-info { flex: 1; min-width: 0; }
-    .buh-up-name {
-      font-size: 14px;
-      font-weight: 600;
-      color: #e8e8f0;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
+    .buh-up-name { font-size: 14px; font-weight: 600; color: #e8e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
     .buh-up-name a { color: inherit; text-decoration: none; }
     .buh-up-name a:hover { color: #fb7299; }
-    .buh-up-sign {
-      font-size: 11px;
-      color: #888;
-      margin-top: 3px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .buh-up-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-      margin-top: 5px;
-    }
-    .buh-vtag {
-      padding: 2px 7px;
-      border-radius: 12px;
-      font-size: 10px;
-      background: rgba(255,255,255,.08);
-      color: #aaa;
-    }
+    .buh-tag-mutual { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: rgba(243, 156, 18, 0.2); color: #f39c12; font-weight: normal; }
+    .buh-up-sign { font-size: 11px; color: #888; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .buh-up-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+    .buh-vtag { padding: 2px 7px; border-radius: 12px; font-size: 10px; background: rgba(255,255,255,.08); color: #aaa; }
     .buh-vtag.highlight { background: rgba(251,114,153,.25); color: #fb7299; }
-    .buh-up-status {
-      font-size: 11px;
-      padding: 3px 10px;
-      border-radius: 20px;
-      flex-shrink: 0;
-      font-weight: 600;
-    }
+    .buh-up-status { font-size: 11px; padding: 3px 10px; border-radius: 20px; flex-shrink: 0; font-weight: 600; }
     .buh-status-analyzing { background: rgba(255,200,0,.12); color: #f0c040; }
     .buh-status-done      { background: rgba(0,200,100,.12); color: #3ecf8e; }
     .buh-status-unfollowed{ background: rgba(100,100,100,.2); color: #666; text-decoration: line-through; }
     .buh-status-error     { background: rgba(231,76,60,.15); color: #e74c3c; }
-    #buh-empty {
-      text-align: center;
-      padding: 40px;
-      color: #555;
-      font-size: 14px;
-    }
-    #buh-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,.5);
-      z-index: 99998;
-      backdrop-filter: blur(3px);
-    }
+    #buh-empty { text-align: center; padding: 40px; color: #555; font-size: 14px; }
+    #buh-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 99998; backdrop-filter: blur(3px); }
     #buh-overlay.hidden { display: none; }
   `);
 
@@ -385,6 +188,8 @@
     analyzeTotal: 0,
     analyzeDone: 0,
     searchText: '',
+    searchTagText: '', // 新增：独立的标签搜索文本
+    filterMutual: false, // 新增：是否仅看互关
   };
 
   // ─── 面板 HTML ───────────────────────────────────────────────────────────────
@@ -407,20 +212,22 @@
         <button id="buh-close">✕</button>
       </div>
       <div id="buh-toolbar">
-        <button class="buh-btn buh-btn-primary" id="buh-btn-load">📋 加载关注列表</button>
-        <button class="buh-btn buh-btn-ghost"   id="buh-btn-analyze" disabled>🔍 分析选中</button>
+        <button class="buh-btn buh-btn-primary" id="buh-btn-load">📋 加载</button>
+        <button class="buh-btn buh-btn-ghost"   id="buh-btn-analyze" disabled>🔍 分析</button>
         <button class="buh-btn buh-btn-ghost"   id="buh-btn-selall"  disabled>全选</button>
         <button class="buh-btn buh-btn-ghost"   id="buh-btn-selinv"  disabled>反选</button>
-        <button class="buh-btn buh-btn-danger"  id="buh-btn-unfollow" disabled>✂️ 取关选中</button>
-        <input id="buh-search" type="text" placeholder="搜索UP主名称…" />
+        <button class="buh-btn buh-btn-ghost"   id="buh-btn-mutual">👥 互关过滤</button>
+        <button class="buh-btn buh-btn-danger"  id="buh-btn-unfollow" disabled>✂️ 取关</button>
+        <input id="buh-search" class="buh-input" type="text" placeholder="搜索UP主…" />
+        <input id="buh-search-tag" class="buh-input" type="text" placeholder="搜索标签…" />
       </div>
       <div id="buh-progress-wrap" style="display:none">
         <div id="buh-progress-bar-bg"><div id="buh-progress-bar"></div></div>
         <div id="buh-progress-text"></div>
       </div>
       <div id="buh-tags-filter"></div>
-      <div id="buh-stats">勾选需要分析的UP主，点击「分析选中」即可获取其最新一期视频的标签。</div>
-      <div id="buh-list-wrap"><div id="buh-empty">点击「加载关注列表」开始</div></div>
+      <div id="buh-stats">勾选需要分析的UP主，点击「分析」获取标签。注意：大量取关会自动启用防风控延迟机制。</div>
+      <div id="buh-list-wrap"><div id="buh-empty">点击「加载」开始</div></div>
     `;
     document.body.appendChild(panel);
     return { panel, overlay };
@@ -452,11 +259,23 @@
   function getFilteredList() {
     return state.followings.filter(up => {
       if (up.status === 'unfollowed') return false;
-      const matchSearch = !state.searchText ||
+      
+      // 互关过滤
+      if (state.filterMutual && !up.isMutual) return false;
+      
+      // UP主名称搜索
+      const matchSearch = !state.searchText || 
         up.name.toLowerCase().includes(state.searchText.toLowerCase());
-      const matchTag = state.selectedTags.size === 0 ||
+        
+      // 标签独立搜索 (文本匹配)
+      const matchTagText = !state.searchTagText || 
+        up.tags.some(t => t.toLowerCase().includes(state.searchTagText.toLowerCase()));
+
+      // 标签云点击匹配
+      const matchTag = state.selectedTags.size === 0 || 
         [...state.selectedTags].every(t => up.tags.some(ut => ut === t));
-      return matchSearch && matchTag;
+        
+      return matchSearch && matchTagText && matchTag;
     });
   }
 
@@ -480,13 +299,17 @@
       if (up.status === 'done') emptyText = up.emptyReason || '暂无标签';
       if (up.status === 'error') emptyText = up.emptyReason || '请求失败';
 
+      // 高亮搜索到的标签
+      const tagSearchLower = state.searchTagText.toLowerCase();
       const tagHtml = up.tags.length
-        ? up.tags.map(t =>
-            `<span class="buh-vtag ${state.selectedTags.has(t) ? 'highlight' : ''}">${t}</span>`
-          ).join('')
+        ? up.tags.map(t => {
+            const isMatch = (state.searchTagText && t.toLowerCase().includes(tagSearchLower)) || state.selectedTags.has(t);
+            return `<span class="buh-vtag ${isMatch ? 'highlight' : ''}">${t}</span>`;
+          }).join('')
         : `<span style="color:#555;font-size:11px">${emptyText}</span>`;
 
       const signText = up.sign || '这个人很懒，什么都没写';
+      const mutualBadge = up.isMutual ? `<span class="buh-tag-mutual">互关</span>` : '';
 
       return `
         <div class="buh-up-card ${up.checked ? 'selected' : ''}" data-mid="${up.mid}">
@@ -495,6 +318,7 @@
           <div class="buh-up-info">
             <div class="buh-up-name">
               <a href="https://space.bilibili.com/${up.mid}" target="_blank">${up.name}</a>
+              ${mutualBadge}
             </div>
             <div class="buh-up-sign" title="${signText}">${signText}</div>
             <div class="buh-up-tags">${tagHtml}</div>
@@ -532,6 +356,15 @@
     document.getElementById('buh-btn-selall').disabled  = !hasFollowings;
     document.getElementById('buh-btn-selinv').disabled  = !hasFollowings;
     document.getElementById('buh-btn-unfollow').disabled= !hasSelected || !notBusy;
+    
+    const mutualBtn = document.getElementById('buh-btn-mutual');
+    if (state.filterMutual) {
+      mutualBtn.classList.add('active');
+      mutualBtn.textContent = '👥 取消互关过滤';
+    } else {
+      mutualBtn.classList.remove('active');
+      mutualBtn.textContent = '👥 仅看互相关注';
+    }
   }
 
   function setProgress(done, total, msg) {
@@ -564,6 +397,7 @@
             name: u.uname,
             face: u.face,
             sign: u.sign,
+            isMutual: u.attribute === 6 || u.attribute === 128 + 6, // 6代表互相关注
             tags: [],
             emptyReason: '',
             status: 'idle',
@@ -591,7 +425,6 @@
     if (state.analyzing) return;
 
     const targets = state.followings.filter(u => u.checked && u.status !== 'unfollowed');
-
     if (targets.length === 0) {
       alert('没有选中的项可以分析！');
       return;
@@ -609,13 +442,10 @@
         `分析中 ${state.analyzeDone}/${state.analyzeTotal}：${up.name}`);
 
       try {
-        // 调用新的双重获取逻辑拿到 BVID
         const bvid = await fetchLatestBvid(up.mid);
-
         if (bvid) {
           await sleep(150);
           const vtags = await fetchVideoTags(bvid);
-
           const extractedTags = vtags.filter(t => t.tag_name).map(t => t.tag_name.toUpperCase());
           up.tags = extractedTags;
 
@@ -632,14 +462,14 @@
         up.status = 'done';
       } catch (e) {
         up.status = 'error';
-        up.emptyReason = '获取失败 (多次请求被拦截)';
+        up.emptyReason = '获取失败 (被拦截)';
       }
 
       state.analyzeDone++;
       renderTagFilter();
       renderList();
       updateStats();
-      await sleep(400);
+      await sleep(400); // 分析请求不用放太慢，但也要留余地
     }
     setProgress(0, 0, '');
     state.analyzing = false;
@@ -649,31 +479,46 @@
   async function unfollowSelected() {
     const targets = state.followings.filter(u => u.checked && u.status !== 'unfollowed');
     if (!targets.length) return;
-    const ok = confirm(`确定取关选中的 ${targets.length} 个UP主吗？此操作不可撤销。`);
+    const ok = confirm(`确定取关选中的 ${targets.length} 个UP主吗？\n\n注意：为防止触发B站风控验证码，取关操作会加入【随机延迟】并每隔20个【暂停冷却8秒】，请耐心等待不要关闭页面。`);
     if (!ok) return;
+    
     state.analyzing = true;
     updateButtons();
     let done = 0;
+    
     for (const up of targets) {
-      setProgress(done, targets.length, `取关中 ${done}/${targets.length}：${up.name}`);
+      setProgress(done, targets.length, `取关中 ${done}/${targets.length}：${up.name} (防风控模式运行中)`);
       try {
         await unfollowUser(up.mid);
         up.status = 'unfollowed';
         up.checked = false;
+        done++;
+        
+        // 防风控策略：随机延迟 + 分批冷却
+        let delay = 1500 + Math.random() * 1500; // 基础延迟 1.5s - 3.0s 随机
+        if (done > 0 && done % 20 === 0 && done < targets.length) {
+            setProgress(done, targets.length, `触发分批冷却：为防止验证码拦截，暂停呼吸 8 秒...`);
+            delay = 8000;
+        }
+        await sleep(delay);
+
       } catch (e) {
         up.status = 'error';
         up.emptyReason = '取关接口失败';
         console.error(`取关 ${up.name} 失败:`, e);
+        
+        if (e.message.includes('风控')) {
+            alert('⚠️ 警告：已被B站风控系统拦截（要求输入验证码）！\n\n任务已中止，剩余UP主未取关。\n建议：前往 Bilibili 主站手动取关任意一人完成验证码验证，或休息 20 分钟后再试。');
+            break; // 立即中止循环
+        }
       }
-      done++;
       renderList();
       updateStats();
-      await sleep(600);
     }
     setProgress(0, 0, '');
     state.analyzing = false;
     updateButtons();
-    alert(`取关完成！成功 ${targets.filter(u => u.status === 'unfollowed').length} 个。`);
+    alert(`批量操作结束！成功取关 ${targets.filter(u => u.status === 'unfollowed').length} 个。`);
   }
 
   // ─── 初始化 ──────────────────────────────────────────────────────────────────
@@ -712,9 +557,23 @@
       getFilteredList().forEach(u => { u.checked = !u.checked; });
       renderList(); updateStats(); updateButtons();
     });
+    
+    // 互关过滤按钮
+    document.getElementById('buh-btn-mutual').addEventListener('click', () => {
+      state.filterMutual = !state.filterMutual;
+      renderList(); updateStats(); updateButtons();
+    });
 
+    // UP主名称搜索
     document.getElementById('buh-search').addEventListener('input', e => {
       state.searchText = e.target.value;
+      renderList();
+      updateStats();
+    });
+
+    // 标签独立搜索
+    document.getElementById('buh-search-tag').addEventListener('input', e => {
+      state.searchTagText = e.target.value;
       renderList();
       updateStats();
     });
