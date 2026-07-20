@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         B站关注列表标签分析 & 批量取关
 // @namespace    https://github.com/brui233/bilibili-unfollow-helper
-// @version      1.9.0
-// @description  按需分析选中的UP主最新视频标签，支持按分组加载、互关保护排除、标签独立搜索、批量取关，内置更宽裕的随机延迟与分批冷却防风控机制
-// @author       Userscript
+// @version      1.10.0
+// @description  按需分析选中的UP主最新视频标签，支持按分组加载、互关保护排除、标签独立搜索、批量取关，内置更宽裕的随机延迟与分批冷却防风控机制。新增失败项自动重试及简介搜索。
+// @author       brui
 // @match        https://space.bilibili.com/*/fans/follow*
 // @match        https://www.bilibili.com/
 // @match        https://space.bilibili.com/*
@@ -203,8 +203,9 @@
     searchText: '',
     searchTagText: '',
     filterMutual: false,
-    mutualMidsLoaded: false, // 标记是否拉取过互关白名单
-    mutualMids: new Set()    // 存储全局互关的 mid 白名单
+    filterError: false,      // 新增：过滤出分析失败的用户
+    mutualMidsLoaded: false,
+    mutualMids: new Set()
   };
 
   // ─── 面板 HTML ───────────────────────────────────────────────────────────────
@@ -235,8 +236,9 @@
         <button class="buh-btn buh-btn-ghost"   id="buh-btn-selall"  disabled>全选</button>
         <button class="buh-btn buh-btn-ghost"   id="buh-btn-selinv"  disabled>反选</button>
         <button class="buh-btn buh-btn-ghost"   id="buh-btn-mutual">👥 仅看互关</button>
+        <button class="buh-btn buh-btn-ghost"   id="buh-btn-error">❌ 仅看分析失败</button>
 
-        <input id="buh-search" class="buh-input" style="flex: 1;" type="text" placeholder="搜索UP主…" />
+        <input id="buh-search" class="buh-input" style="flex: 1;" type="text" placeholder="搜索UP主/简介…" />
         <input id="buh-search-tag" class="buh-input" style="flex: 1;" type="text" placeholder="搜索标签…" />
       </div>
       <div id="buh-progress-wrap" style="display:none">
@@ -247,6 +249,10 @@
       <div id="buh-stats">
         <span>勾选UP主分析标签，防风控策略已增强。</span>
         <div style="display: flex; gap: 12px; align-items: center;">
+          <label style="display: flex; align-items: center; gap: 4px; color: #3ecf8e; cursor: pointer; font-size: 13px; font-weight: bold;" title="一轮分析完毕后，若发现失败项将自动尝试重新获取">
+            <input type="checkbox" id="buh-auto-retry" checked style="accent-color: #3ecf8e; width: 16px; height: 16px;">
+            🔄 自动重试失败项
+          </label>
           <label style="display: flex; align-items: center; gap: 4px; color: #f39c12; cursor: pointer; font-size: 13px; font-weight: bold;">
             <input type="checkbox" id="buh-protect-mutual" checked style="accent-color: #f39c12; width: 16px; height: 16px;">
             🛡️ 保护互关不被勾选
@@ -288,7 +294,14 @@
     return state.followings.filter(up => {
       if (up.status === 'unfollowed') return false;
       if (state.filterMutual && !up.isMutual) return false;
-      const matchSearch = !state.searchText || up.name.toLowerCase().includes(state.searchText.toLowerCase());
+      if (state.filterError && up.status !== 'error') return false; // 添加了对错误状态的筛选
+
+      // 拓展：除了UP主的昵称，增加对UP主签名(简介)的搜索匹配
+      const searchTextLower = state.searchText.toLowerCase();
+      const matchSearch = !state.searchText ||
+                          up.name.toLowerCase().includes(searchTextLower) ||
+                          (up.sign && up.sign.toLowerCase().includes(searchTextLower));
+
       const matchTagText = !state.searchTagText || up.tags.some(t => t.toLowerCase().includes(state.searchTagText.toLowerCase()));
       const matchTag = state.selectedTags.size === 0 || [...state.selectedTags].every(t => up.tags.some(ut => ut === t));
       return matchSearch && matchTagText && matchTag;
@@ -362,9 +375,10 @@
     const el = document.getElementById('buh-stats-text');
     const total = state.followings.filter(u => u.status !== 'unfollowed').length;
     const analyzed = state.followings.filter(u => u.status === 'done').length;
+    const errors = state.followings.filter(u => u.status === 'error').length;
     const selected = state.followings.filter(u => u.checked && u.status !== 'unfollowed').length;
     const filtered = getFilteredList().length;
-    el.innerHTML = `当前列表共 <b>${total}</b> 个关注 · 已分析 <b>${analyzed}</b> · 显示过滤 <b>${filtered}</b> · 即将操作选中 <b>${selected}</b> 个`;
+    el.innerHTML = `当前列表共 <b>${total}</b> 个关注 · 已分析 <b>${analyzed}</b>${errors > 0 ? ` · 失败 <b>${errors}</b>` : ''} · 显示过滤 <b>${filtered}</b> · 即将操作选中 <b>${selected}</b> 个`;
   }
 
   function updateButtons() {
@@ -384,6 +398,15 @@
     } else {
       mutualBtn.classList.remove('active');
       mutualBtn.textContent = '👥 仅看互相关注';
+    }
+
+    const errorBtn = document.getElementById('buh-btn-error');
+    if (state.filterError) {
+      errorBtn.classList.add('active');
+      errorBtn.textContent = '❌ 取消失败过滤';
+    } else {
+      errorBtn.classList.remove('active');
+      errorBtn.textContent = '❌ 仅看分析失败';
     }
   }
 
@@ -417,12 +440,10 @@
     setProgress(0, 1, '🛡️ 安全机制：因B站分组接口不包含互关状态，正在后台提取【互关白名单】防止误删...');
 
     while (true) {
-        // 使用默认接口强制获取所有关注及其 attribute
         const data = await gmFetch(`https://api.bilibili.com/x/relation/followings?vmid=${uid}&pn=${pn}&ps=${ps}&order=desc`);
         const list = data?.data?.list || [];
 
         list.forEach(u => {
-            // 提取出所有互关好友的 UID 存入集合
             if (u.attribute === 6 || u.attribute === 128 + 6) {
                 state.mutualMids.add(u.mid);
             }
@@ -433,7 +454,7 @@
 
         if (list.length < ps) break;
         pn++;
-        await sleep(250); // 控制请求频率
+        await sleep(250);
     }
     state.mutualMidsLoaded = true;
   }
@@ -452,7 +473,6 @@
     state.selectedTags = new Set();
 
     try {
-      // 🛡️ 判断逻辑：如果是特定分组，必须先确保互关白名单已加载
       if (tagid !== "0" && tagid !== 0 && !state.mutualMidsLoaded) {
           await preloadMutualMids(uid);
       }
@@ -467,15 +487,11 @@
 
         list.forEach(u => {
           let isMutual = false;
-
           if (tagid === "0" || tagid === 0) {
-              // 1. 如果是“全部关注”，自带 attribute 属性
               isMutual = (u.attribute === 6 || u.attribute === 128 + 6);
-              // 顺手将其加入白名单，省去后续跨分组切换再加载的麻烦
               if (isMutual) state.mutualMids.add(u.mid);
               state.mutualMidsLoaded = true;
           } else {
-              // 2. 如果是特定分组，通过 UID 对比互关白名单
               isMutual = state.mutualMids.has(u.mid);
           }
 
@@ -510,6 +526,7 @@
     document.getElementById('buh-btn-load').textContent = '🔄 重新加载本组';
   }
 
+  // 修改版：支持自动重试失败项的分析逻辑
   async function analyzeTags() {
     if (state.analyzing) return;
 
@@ -521,45 +538,76 @@
 
     state.analyzing = true;
     updateButtons();
-    state.analyzeTotal = targets.length;
-    state.analyzeDone = 0;
 
-    for (const up of targets) {
-      up.status = 'analyzing';
-      renderList();
-      setProgress(state.analyzeDone, state.analyzeTotal,
-        `分析中 ${state.analyzeDone}/${state.analyzeTotal}：${up.name}`);
+    let currentTargets = [...targets];
+    let retryCount = 0;
+    const maxRetries = 3; // 限制最大重试次数为3次，避免风控死循环
 
-      try {
-        const bvid = await fetchLatestBvid(up.mid);
-        if (bvid) {
-          await sleep(150);
-          const vtags = await fetchVideoTags(bvid);
-          const extractedTags = vtags.filter(t => t.tag_name).map(t => t.tag_name.toUpperCase());
-          up.tags = extractedTags;
+    while (currentTargets.length > 0 && retryCount <= maxRetries) {
+        state.analyzeTotal = currentTargets.length;
+        state.analyzeDone = 0;
+        const isRetry = retryCount > 0;
 
-          if (extractedTags.length > 0) {
-            extractedTags.forEach(t => { state.allTags[t] = (state.allTags[t] || 0) + 1; });
-            up.emptyReason = '';
-          } else {
-            up.emptyReason = '最新视频未设置标签';
+        for (const up of currentTargets) {
+          up.status = 'analyzing';
+          renderList();
+          setProgress(state.analyzeDone, state.analyzeTotal,
+            `${isRetry ? `[自动重试 ${retryCount}] ` : ''}分析中 ${state.analyzeDone}/${state.analyzeTotal}：${up.name}`);
+
+          try {
+            const bvid = await fetchLatestBvid(up.mid);
+            if (bvid) {
+              await sleep(150);
+              const vtags = await fetchVideoTags(bvid);
+              const extractedTags = vtags.filter(t => t.tag_name).map(t => t.tag_name.toUpperCase());
+              up.tags = extractedTags;
+
+              if (extractedTags.length > 0) {
+                extractedTags.forEach(t => { state.allTags[t] = (state.allTags[t] || 0) + 1; });
+                up.emptyReason = '';
+              } else {
+                up.emptyReason = '最新视频未设置标签';
+              }
+            } else {
+              up.tags = [];
+              up.emptyReason = '该UP主暂未发布视频';
+            }
+            up.status = 'done';
+          } catch (e) {
+            up.status = 'error';
+            up.emptyReason = '获取失败 (被拦截)';
           }
-        } else {
-          up.tags = [];
-          up.emptyReason = '该UP主暂未发布视频';
-        }
-        up.status = 'done';
-      } catch (e) {
-        up.status = 'error';
-        up.emptyReason = '获取失败 (被拦截)';
-      }
 
-      state.analyzeDone++;
-      renderTagFilter();
-      renderList();
-      updateStats();
-      await sleep(400);
+          state.analyzeDone++;
+          renderTagFilter();
+          renderList();
+          updateStats();
+          // 如果是重试，稍稍拉长每次请求的间隔
+          await sleep(isRetry ? 800 : 400);
+        }
+
+        const autoRetry = document.getElementById('buh-auto-retry').checked;
+        if (autoRetry) {
+            // 筛选出本轮仍获取失败的项
+            currentTargets = currentTargets.filter(u => u.status === 'error');
+            if (currentTargets.length > 0) {
+                retryCount++;
+                if (retryCount <= maxRetries) {
+                    setProgress(0, 1, `✅ 本轮完毕，发现 ${currentTargets.length} 个获取失败。3秒后自动进行第 ${retryCount} 次重试...`);
+                    await sleep(3000);
+                } else {
+                    setProgress(0, 1, `❌ 连续重试 ${maxRetries} 次后，仍有 ${currentTargets.length} 个失败。请稍后重试或尝试手动通过验证。`);
+                    await sleep(2500);
+                    break;
+                }
+            } else {
+                break; // 全部成功了，跳出循环
+            }
+        } else {
+            break; // 用户没有勾选自动重试
+        }
     }
+
     setProgress(0, 0, '');
     state.analyzing = false;
     updateButtons();
@@ -687,8 +735,15 @@
       renderList(); updateStats(); updateButtons();
     });
 
+    // 独立互关过滤按钮事件
     document.getElementById('buh-btn-mutual').addEventListener('click', () => {
       state.filterMutual = !state.filterMutual;
+      renderList(); updateStats(); updateButtons();
+    });
+
+    // 独立失败项过滤按钮事件
+    document.getElementById('buh-btn-error').addEventListener('click', () => {
+      state.filterError = !state.filterError;
       renderList(); updateStats(); updateButtons();
     });
 
