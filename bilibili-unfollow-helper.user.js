@@ -5,7 +5,6 @@
 // @description  按需分析选中的UP主最新视频标签，支持按分组加载、互关保护排除、标签独立搜索、批量取关，内置更宽裕的随机延迟与分批冷却防风控机制。新增失败项自动重试及简介搜索。
 // @author       brui
 // @match        https://space.bilibili.com/*/fans/follow*
-// @match        https://www.bilibili.com/
 // @match        https://space.bilibili.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
