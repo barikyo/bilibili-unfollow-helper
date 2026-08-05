@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         B站关注列表标签分析 & 批量取关
+// @name         B站关注列表标签分析 & 批量取关 (bilibili-unfollow-helper)
 // @namespace    https://github.com/brui233/bilibili-unfollow-helper
 // @version      1.10.0
 // @description  按需分析选中的UP主最新视频标签，支持按分组加载、互关保护排除、标签独立搜索、批量取关，内置更宽裕的随机延迟与分批冷却防风控机制。新增失败项自动重试及简介搜索。
